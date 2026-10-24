@@ -50,6 +50,7 @@ jobs:
           fi
           printf '%s' "$RELEASE_KEYSTORE_BASE64" | base64 --decode > source/RewindYou/app/rewindyou-release.jks
 
+
       - name: Configure release signing
         working-directory: source/RewindYou/app
         env:
@@ -63,9 +64,14 @@ jobs:
           p = Path("build.gradle.kts")
           s = p.read_text()
 
-          s = s.replace(
-              "android {",
-              """android {
+          if 'create("release")' in s:
+              raise SystemExit("La configuración release ya existe; no se modificó el archivo.")
+
+          marker = "android {\n"
+          if marker not in s:
+              raise SystemExit("No se encontró el bloque android.")
+
+          signing = """android {
               signingConfigs {
                   create("release") {
                       storeFile = file("rewindyou-release.jks")
@@ -79,26 +85,12 @@ jobs:
                       signingConfig = signingConfigs.getByName("release")
                   }
               }
-          """,
-              1
-          )
+          """
 
-          s = s.replace(
-              "android {",
-              """android {
-              compileOptions {
-                  sourceCompatibility = JavaVersion.VERSION_17
-                  targetCompatibility = JavaVersion.VERSION_17
-              }
-              kotlinOptions {
-                  jvmTarget = "17"
-              }
-          """,
-              1
-          )
-
+          s = s.replace(marker, signing, 1)
           p.write_text(s)
           PY
+
 
       - name: Build signed release APK
         working-directory: source/RewindYou
