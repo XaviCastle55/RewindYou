@@ -102,8 +102,11 @@ jobs:
 
       - name: Build signed release APK
         working-directory: source/RewindYou
+        env:
+          RELEASE_KEYSTORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
         run: gradle assembleRelease
-
       - name: Upload signed APK
         uses: actions/upload-artifact@v4
         with:
