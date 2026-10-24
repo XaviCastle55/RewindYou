@@ -20,7 +20,7 @@ jobs:
 
       - name: Find and extract project ZIP
         run: |
-          ARCHIVE=$(find . -maxdepth 1 -type f -name 'RewindYou-source-v0.2.0.zip' -print -quit)
+          ARCHIVE=$(find . -maxdepth 1 -type f -name 'RewindYou-source-v0.2.1-selector-fix.zip' -print -quit)
           if [ -z "$ARCHIVE" ]; then
             echo "No se encontró el ZIP del proyecto."
             exit 1
