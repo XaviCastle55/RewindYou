@@ -1,4 +1,3 @@
-
 name: Build RewindYou APK
 
 on:
@@ -21,11 +20,12 @@ jobs:
 
       - name: Find and extract project ZIP
         run: |
-          ARCHIVE=$(find . -maxdepth 1 -type f -name 'RewindYou-source-v0.2.1-selector-fix.zip' -print -quit)
+          ARCHIVE=$(ls -1 RewindYou-source-*.zip 2>/dev/null | sort -V | tail -n 1)
           if [ -z "$ARCHIVE" ]; then
-            echo "No se encontró el ZIP del proyecto."
+            echo "No se encontró ningún ZIP RewindYou-source-*.zip en la raíz del repositorio."
             exit 1
           fi
+          echo "Usando: $ARCHIVE"
           mkdir source
           unzip -q "$ARCHIVE" -d source
 
@@ -43,13 +43,40 @@ jobs:
       - name: Prepare signing key
         env:
           RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+          RELEASE_KEYSTORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
         run: |
           if [ -z "$RELEASE_KEYSTORE_BASE64" ]; then
-            echo "Falta el secreto de la clave de firma."
+            echo "Falta el secreto RELEASE_KEYSTORE_BASE64."
             exit 1
           fi
-          printf '%s' "$RELEASE_KEYSTORE_BASE64" | base64 --decode > source/RewindYou/app/rewindyou-release.jks
 
+          # Quita espacios, tabs y saltos de línea (incluido el formato de Windows).
+          CLEAN=$(printf '%s' "$RELEASE_KEYSTORE_BASE64" | tr -d '[:space:]')
+
+          # Diagnóstico seguro: solo cuenta caracteres, nunca muestra el contenido.
+          BAD=$(printf '%s' "$CLEAN" | LC_ALL=C tr -d 'A-Za-z0-9+/=' | wc -c)
+          echo "Longitud del secreto: ${#CLEAN} caracteres"
+          echo "Caracteres que no son Base64: $BAD"
+
+          if [ "$BAD" -ne 0 ]; then
+            echo "ERROR: el secreto contiene caracteres que no son Base64 (comillas, texto extra o símbolos raros). Vuelve a crearlo pegando solo el texto Base64."
+            exit 1
+          fi
+          if [ $(( ${#CLEAN} % 4 )) -ne 0 ]; then
+            echo "ERROR: el secreto parece estar cortado o incompleto (la longitud debe ser múltiplo de 4). Vuelve a pegarlo completo."
+            exit 1
+          fi
+
+          printf '%s' "$CLEAN" | base64 -d > source/RewindYou/app/rewindyou-release.jks
+
+          # Comprueba que la llave abre con la contraseña y el alias indicados.
+          # La huella SHA-256 que se imprime es pública: debe ser igual en todas las compilaciones.
+          if ! keytool -list -keystore source/RewindYou/app/rewindyou-release.jks \
+              -storepass "$RELEASE_KEYSTORE_PASSWORD" -alias "$RELEASE_KEY_ALIAS"; then
+            echo "ERROR: no se pudo abrir la llave. Revisa RELEASE_KEYSTORE_PASSWORD y RELEASE_KEY_ALIAS."
+            exit 1
+          fi
 
       - name: Configure release signing
         working-directory: source/RewindYou/app
@@ -91,7 +118,6 @@ jobs:
           p.write_text(s)
           PY
 
-
       - name: Build signed release APK
         working-directory: source/RewindYou
         env:
@@ -99,6 +125,7 @@ jobs:
           RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
           RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
         run: gradle assembleRelease
+
       - name: Upload signed APK
         uses: actions/upload-artifact@v4
         with:
