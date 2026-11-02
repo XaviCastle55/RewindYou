@@ -2,13 +2,18 @@ name: Build RewindYou APK
 
 on:
   workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publicar el APK en una Release de GitHub (para compartir el enlace)"
+        type: boolean
+        default: false
   push:
     paths:
       - ".github/workflows/android.yml"
       - "*.zip"
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -69,11 +74,18 @@ jobs:
           fi
 
           printf '%s' "$CLEAN" | base64 -d > source/RewindYou/app/rewindyou-release.jks
+          echo "Huella del archivo de llave (primeros 16 caracteres): $(sha256sum source/RewindYou/app/rewindyou-release.jks | cut -c1-16)"
+
+          # Quita espacios o saltos de línea que se hayan colado al pegar los secretos.
+          PASS=$(printf '%s' "$RELEASE_KEYSTORE_PASSWORD" | tr -d '[:space:]')
+          ALIAS=$(printf '%s' "$RELEASE_KEY_ALIAS" | tr -d '[:space:]')
+          echo "Longitud de la contraseña: ${#PASS} caracteres"
+          echo "Longitud del alias: ${#ALIAS} caracteres"
 
           # Comprueba que la llave abre con la contraseña y el alias indicados.
           # La huella SHA-256 que se imprime es pública: debe ser igual en todas las compilaciones.
           if ! keytool -list -keystore source/RewindYou/app/rewindyou-release.jks \
-              -storepass "$RELEASE_KEYSTORE_PASSWORD" -alias "$RELEASE_KEY_ALIAS"; then
+              -storepass "$PASS" -alias "$ALIAS"; then
             echo "ERROR: no se pudo abrir la llave. Revisa RELEASE_KEYSTORE_PASSWORD y RELEASE_KEY_ALIAS."
             exit 1
           fi
@@ -102,9 +114,9 @@ jobs:
               signingConfigs {
                   create("release") {
                       storeFile = file("rewindyou-release.jks")
-                      storePassword = System.getenv("RELEASE_KEYSTORE_PASSWORD")
-                      keyAlias = System.getenv("RELEASE_KEY_ALIAS")
-                      keyPassword = System.getenv("RELEASE_KEY_PASSWORD")
+                      storePassword = System.getenv("RELEASE_KEYSTORE_PASSWORD").trim()
+                      keyAlias = System.getenv("RELEASE_KEY_ALIAS").trim()
+                      keyPassword = System.getenv("RELEASE_KEY_PASSWORD").trim()
                   }
               }
               buildTypes {
@@ -132,4 +144,19 @@ jobs:
           name: RewindYou-signed-APK
           path: source/RewindYou/app/build/outputs/apk/release/app-release.apk
           if-no-files-found: error
-          
+
+      - name: Publish GitHub Release
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION=$(grep -oP 'versionName = "\K[^"]+' source/RewindYou/app/build.gradle.kts)
+          cp source/RewindYou/app/build/outputs/apk/release/app-release.apk "RewindYou-$VERSION.apk"
+          if gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release upload "v$VERSION" "RewindYou-$VERSION.apk" --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "v$VERSION" "RewindYou-$VERSION.apk" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "RewindYou $VERSION" \
+              --notes "Descarga el archivo .apk, ábrelo en tu teléfono Android y permite instalar desde esta fuente. Requiere Android 8 o superior. Si ya tienes una versión anterior firmada con la misma llave, se actualiza encima sin perder datos."
+          fi
