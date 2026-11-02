@@ -1,0 +1,163 @@
+name: Build RewindYou APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publicar el APK en una Release de GitHub (para compartir el enlace)"
+        type: boolean
+        default: false
+  push:
+    paths:
+      - ".github/workflows/android.yml"
+      - "*.zip"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Find and extract project ZIP
+        run: |
+          ARCHIVE=$(ls -1 RewindYou-source-*.zip 2>/dev/null | sort -V | tail -n 1)
+          if [ -z "$ARCHIVE" ]; then
+            echo "No se encontró ningún ZIP RewindYou-source-*.zip en la raíz del repositorio."
+            exit 1
+          fi
+          echo "Usando: $ARCHIVE"
+          mkdir source
+          unzip -q "$ARCHIVE" -d source
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Prepare signing key
+        env:
+          RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+          RELEASE_KEYSTORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+        run: |
+          if [ -z "$RELEASE_KEYSTORE_BASE64" ]; then
+            echo "Falta el secreto RELEASE_KEYSTORE_BASE64."
+            exit 1
+          fi
+
+          # Quita espacios, tabs y saltos de línea (incluido el formato de Windows).
+          CLEAN=$(printf '%s' "$RELEASE_KEYSTORE_BASE64" | tr -d '[:space:]')
+
+          # Diagnóstico seguro: solo cuenta caracteres, nunca muestra el contenido.
+          BAD=$(printf '%s' "$CLEAN" | LC_ALL=C tr -d 'A-Za-z0-9+/=' | wc -c)
+          echo "Longitud del secreto: ${#CLEAN} caracteres"
+          echo "Caracteres que no son Base64: $BAD"
+
+          if [ "$BAD" -ne 0 ]; then
+            echo "ERROR: el secreto contiene caracteres que no son Base64 (comillas, texto extra o símbolos raros). Vuelve a crearlo pegando solo el texto Base64."
+            exit 1
+          fi
+          if [ $(( ${#CLEAN} % 4 )) -ne 0 ]; then
+            echo "ERROR: el secreto parece estar cortado o incompleto (la longitud debe ser múltiplo de 4). Vuelve a pegarlo completo."
+            exit 1
+          fi
+
+          printf '%s' "$CLEAN" | base64 -d > source/RewindYou/app/rewindyou-release.jks
+          echo "Huella del archivo de llave (primeros 16 caracteres): $(sha256sum source/RewindYou/app/rewindyou-release.jks | cut -c1-16)"
+
+          # Quita espacios o saltos de línea que se hayan colado al pegar los secretos.
+          PASS=$(printf '%s' "$RELEASE_KEYSTORE_PASSWORD" | tr -d '[:space:]')
+          ALIAS=$(printf '%s' "$RELEASE_KEY_ALIAS" | tr -d '[:space:]')
+          echo "Longitud de la contraseña: ${#PASS} caracteres"
+          echo "Longitud del alias: ${#ALIAS} caracteres"
+
+          # Comprueba que la llave abre con la contraseña y el alias indicados.
+          # La huella SHA-256 que se imprime es pública: debe ser igual en todas las compilaciones.
+          if ! keytool -list -keystore source/RewindYou/app/rewindyou-release.jks \
+              -storepass "$PASS" -alias "$ALIAS"; then
+            echo "ERROR: no se pudo abrir la llave. Revisa RELEASE_KEYSTORE_PASSWORD y RELEASE_KEY_ALIAS."
+            exit 1
+          fi
+
+      - name: Configure release signing
+        working-directory: source/RewindYou/app
+        env:
+          RELEASE_KEYSTORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("build.gradle.kts")
+          s = p.read_text()
+
+          if 'create("release")' in s:
+              raise SystemExit("La configuración release ya existe; no se modificó el archivo.")
+
+          marker = "android {\n"
+          if marker not in s:
+              raise SystemExit("No se encontró el bloque android.")
+
+          signing = """android {
+              signingConfigs {
+                  create("release") {
+                      storeFile = file("rewindyou-release.jks")
+                      storePassword = System.getenv("RELEASE_KEYSTORE_PASSWORD").trim()
+                      keyAlias = System.getenv("RELEASE_KEY_ALIAS").trim()
+                      keyPassword = System.getenv("RELEASE_KEY_PASSWORD").trim()
+                  }
+              }
+              buildTypes {
+                  getByName("release") {
+                      signingConfig = signingConfigs.getByName("release")
+                  }
+              }
+          """
+
+          s = s.replace(marker, signing, 1)
+          p.write_text(s)
+          PY
+
+      - name: Build signed release APK
+        working-directory: source/RewindYou
+        env:
+          RELEASE_KEYSTORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+        run: gradle assembleRelease
+
+      - name: Upload signed APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: RewindYou-signed-APK
+          path: source/RewindYou/app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION=$(grep -oP 'versionName = "\K[^"]+' source/RewindYou/app/build.gradle.kts)
+          cp source/RewindYou/app/build/outputs/apk/release/app-release.apk "RewindYou-$VERSION.apk"
+          if gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release upload "v$VERSION" "RewindYou-$VERSION.apk" --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "v$VERSION" "RewindYou-$VERSION.apk" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "RewindYou $VERSION" \
+              --notes "Descarga el archivo .apk, ábrelo en tu teléfono Android y permite instalar desde esta fuente. Requiere Android 8 o superior. Si ya tienes una versión anterior firmada con la misma llave, se actualiza encima sin perder datos."
+          fi
+          
